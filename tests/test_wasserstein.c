@@ -266,7 +266,7 @@ int main(void)
         wot_matrix_t *cost = make_cost_sq_euclid(4, 4);
         double w2 = wot_wasserstein_2(cost, a, 4, a, 4, 0.1, 1000, 1e-9);
         ASSERT(w2 >= 0.0, "W2(a,a) >= 0");
-        ASSERT_APPROX(w2, 0.0, 1e-4, "W2(a,a) ≈ 0");
+        ASSERT_APPROX(w2, 0.0, 0.01, "W2(a,a) ≈ 0");
         wot_mat_free(cost);
         printf("  PASS: W2 identical ≈ 0\n");
     }
@@ -278,7 +278,6 @@ int main(void)
         wot_matrix_t *cost = make_cost_sq_euclid(3, 3);
         double w2 = wot_wasserstein_2(cost, a, 3, b, 3, 0.01, 1000, 1e-9);
         ASSERT(w2 > 0.0, "W2 different dists > 0");
-        /* With squared euclidean on 3 points: W2²(delta_0, delta_2) should be ~4 */
         ASSERT(w2 > 1.0, "W2 delta_0 vs delta_2 is large");
         wot_mat_free(cost);
         printf("  PASS: W2 non-negative and meaningful\n");
@@ -441,6 +440,132 @@ int main(void)
         wot_mat_free(m);
         tests_passed++; tests_run++; /* no crash = pass */
         printf("  PASS: zero-size matrix alloc/free\n");
+    }
+
+    /* ---- JKO Fix: uses current measure as target ---- */
+    printf("\n[JKO Fix: target = current measure]\n");
+
+    /* 31. JKO with non-uniform current measure preserves structure */
+    {
+        size_t n = 5;
+        double measure[] = {0.5, 0.3, 0.1, 0.05, 0.05};
+        double grad[] = {0.0, 0.0, 0.0, 0.0, 0.0}; /* zero gradient */
+        wot_matrix_t *cost = make_cost_sq_euclid(n, n);
+        double *result = wot_jko_step(cost, measure, n, grad, 0.1, 0.1, 500, 1e-6);
+        ASSERT(result != NULL, "JKO non-uniform zero grad returns non-NULL");
+        ASSERT(wot_is_probability(result, n, 0.05), "JKO non-uniform zero grad is probability");
+        /* With zero gradient, result should stay close to original measure (not uniform!) */
+        /* The old bug would push toward uniform; the fix keeps it near original */
+        double max_dev_from_orig = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            double dev = fabs(result[i] - measure[i]);
+            if (dev > max_dev_from_orig) max_dev_from_orig = dev;
+        }
+        /* Should be close to original, not close to uniform (0.2 each) */
+        ASSERT(max_dev_from_orig < 0.1, "JKO zero grad stays near original (not uniform)");
+        /* Verify it's NOT uniform - mass should still be concentrated at index 0 */
+        ASSERT(result[0] > result[4], "JKO preserves non-uniform structure");
+        wot_mat_free(cost);
+        free(result);
+        printf("  PASS: JKO uses current measure as target (not uniform)\n");
+    }
+
+    /* 32. JKO gradient pushes non-uniform measure correctly */
+    {
+        size_t n = 4;
+        double measure[] = {0.7, 0.2, 0.1, 0.0};
+        double grad[] = {5.0, 0.0, 0.0, -5.0}; /* pushes mass from index 0 toward index 3 */
+        wot_matrix_t *cost = make_cost_sq_euclid(n, n);
+        double *result = wot_jko_step(cost, measure, n, grad, 1.0, 0.1, 500, 1e-6);
+        ASSERT(result != NULL, "JKO non-uniform gradient returns non-NULL");
+        ASSERT(wot_is_probability(result, n, 0.1), "JKO non-uniform gradient is probability");
+        /* Mass should shift toward index 3 (lower grad) vs index 0 (higher grad) */
+        ASSERT(result[3] > measure[3] || result[0] < measure[0], "JKO gradient redistributes mass");
+        wot_mat_free(cost);
+        free(result);
+        printf("  PASS: JKO gradient pushes non-uniform measure\n");
+    }
+
+    /* ---- W2 Fix: returns sqrt of OT cost ---- */
+    printf("\n[W2 Fix: returns actual W2 = sqrt(OT cost)]\n");
+
+    /* 33. W2: dirac delta distance is correct */
+    {
+        double a[] = {1.0, 0.0, 0.0};
+        double b[] = {0.0, 0.0, 1.0};
+        wot_matrix_t *cost = make_cost_sq_euclid(3, 3);
+        /* Cost matrix: (i-j)^2. W2(delta_0, delta_2) = sqrt(4) = 2.0 */
+        double w2 = wot_wasserstein_2(cost, a, 3, b, 3, 0.001, 1000, 1e-9);
+        ASSERT(w2 > 0.0, "W2 delta distance is positive");
+        ASSERT_APPROX(w2, 2.0, 0.3, "W2(delta_0, delta_2) ≈ 2.0 (not 4.0)");
+        wot_mat_free(cost);
+        printf("  PASS: W2 returns sqrt (delta_0 vs delta_2 ≈ 2.0)\n");
+    }
+
+    /* 34. W2: shift by one */
+    {
+        double a[] = {1.0, 0.0};
+        double b[] = {0.0, 1.0};
+        wot_matrix_t *cost = make_cost_sq_euclid(2, 2);
+        /* W2(delta_0, delta_1) = sqrt(1) = 1.0 */
+        double w2 = wot_wasserstein_2(cost, a, 2, b, 2, 0.001, 1000, 1e-9);
+        ASSERT(w2 > 0.0, "W2 shift by one is positive");
+        ASSERT_APPROX(w2, 1.0, 0.2, "W2(delta_0, delta_1) ≈ 1.0");
+        wot_mat_free(cost);
+        printf("  PASS: W2 returns sqrt (delta_0 vs delta_1 ≈ 1.0)\n");
+    }
+
+    /* ---- Barycenter Fix: convergence check ---- */
+    printf("\n[Barycenter Fix: convergence check]\n");
+
+    /* 35. Barycenter converges early with identical inputs */
+    {
+        size_t n = 4;
+        double p[] = {0.25, 0.25, 0.25, 0.25};
+        wot_matrix_t *cost = make_cost_sq_euclid(n, n);
+        const wot_matrix_t *costs[] = {cost, cost};
+        const double *measures[] = {p, p};
+        double weights[] = {0.5, 0.5};
+        /* Run with very tight tol and large max_iter — should converge early */
+        double *bary = wot_barycenter(costs, measures, weights, 2, n, 0.1, 1000, 200, 1e-12);
+        ASSERT(bary != NULL, "barycenter convergence test returns non-NULL");
+        ASSERT(wot_is_probability(bary, n, 1e-6), "barycenter convergence test is probability");
+        /* Result should be very close to uniform */
+        double max_dev = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            double dev = fabs(bary[i] - 0.25);
+            if (dev > max_dev) max_dev = dev;
+        }
+        ASSERT(max_dev < 0.01, "barycenter convergence test ≈ uniform");
+        wot_mat_free(cost);
+        free(bary);
+        printf("  PASS: barycenter converges with identical inputs\n");
+    }
+
+    /* 36. Barycenter with tight tolerance produces stable result */
+    {
+        size_t n = 5;
+        double a[] = {1.0, 0.0, 0.0, 0.0, 0.0};
+        double b[] = {0.0, 0.0, 0.0, 0.0, 1.0};
+        wot_matrix_t *cost = make_cost_sq_euclid(n, n);
+        const wot_matrix_t *costs[] = {cost, cost};
+        const double *measures[] = {a, b};
+        double weights[] = {0.5, 0.5};
+        /* Two runs with different max_iter should give same result if converged */
+        double *bary1 = wot_barycenter(costs, measures, weights, 2, n, 0.5, 100, 300, 1e-8);
+        double *bary2 = wot_barycenter(costs, measures, weights, 2, n, 0.5, 200, 300, 1e-8);
+        ASSERT(bary1 != NULL && bary2 != NULL, "barycenter stability returns non-NULL");
+        /* Results should be very close — convergence reached in both */
+        double max_diff = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            double diff = fabs(bary1[i] - bary2[i]);
+            if (diff > max_diff) max_diff = diff;
+        }
+        ASSERT(max_diff < 0.01, "barycenter stable across different max_iter");
+        wot_mat_free(cost);
+        free(bary1);
+        free(bary2);
+        printf("  PASS: barycenter convergence is stable\n");
     }
 
     /* ---- Summary ---- */

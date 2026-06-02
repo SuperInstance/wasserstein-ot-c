@@ -228,7 +228,9 @@ double wot_wasserstein_2(const wot_matrix_t *cost,
 {
     wot_sinkhorn_result_t *res = wot_sinkhorn(cost, a, a_len, b, b_len, reg, max_iter, tol);
     if (!res) return -1.0;
-    double dist = res->distance;
+    /* Sinkhorn returns sum(P_ij * C_ij). With squared-Euclidean cost this is W2^2.
+       Take sqrt to get the actual Wasserstein-2 distance. */
+    double dist = (res->distance >= 0.0) ? sqrt(res->distance) : -1.0;
     wot_sinkhorn_result_free(res);
     return dist;
 }
@@ -251,7 +253,13 @@ double *wot_barycenter(const wot_matrix_t **costs,
     double *new_log = malloc(n * sizeof(double));
     if (!log_bary || !new_log) { free(bary); free(log_bary); free(new_log); return NULL; }
 
+    double *prev_bary = malloc(n * sizeof(double));
+    if (!prev_bary) { free(bary); free(log_bary); free(new_log); return NULL; }
+
     for (int iter = 0; iter < max_iter; iter++) {
+        /* Save previous barycenter for convergence check */
+        memcpy(prev_bary, bary, n * sizeof(double));
+
         for (size_t i = 0; i < n; i++) log_bary[i] = log(bary[i]);
 
         /* weighted average of log dual potentials (fixed-point iteration) */
@@ -261,7 +269,7 @@ double *wot_barycenter(const wot_matrix_t **costs,
             wot_sinkhorn_result_t *res = wot_sinkhorn(costs[k], bary, n,
                                                        measures[k], n,
                                                        reg, sinkhorn_max_iter, tol);
-            if (!res) { free(bary); free(log_bary); free(new_log); return NULL; }
+            if (!res) { free(bary); free(log_bary); free(new_log); free(prev_bary); return NULL; }
 
             /* Accumulate weighted transport plan marginals */
             for (size_t i = 0; i < n; i++) {
@@ -285,7 +293,17 @@ double *wot_barycenter(const wot_matrix_t **costs,
         if (total > 0) {
             for (size_t i = 0; i < n; i++) bary[i] /= total;
         }
+
+        /* Convergence check: max absolute change */
+        double max_change = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            double change = fabs(bary[i] - prev_bary[i]);
+            if (change > max_change) max_change = change;
+        }
+        if (max_change < tol) break;
     }
+
+    free(prev_bary);
 
     free(log_bary);
     free(new_log);
@@ -308,10 +326,10 @@ double *wot_jko_step(const wot_matrix_t *cost,
         for (size_t j = 0; j < n; j++)
             wot_mat_set(mod_cost, i, j, wot_mat_get(cost, i, j) + step_size * grad[j]);
 
-    /* Target is uniform — we transport from measure to find the proximal map */
+    /* Target is the current measure — JKO proximal step: mu_{k+1} = argmin_mu { W(mu, mu_k) + tau * <grad, mu> } */
     double *target = malloc(n * sizeof(double));
     if (!target) { wot_mat_free(mod_cost); return NULL; }
-    for (size_t i = 0; i < n; i++) target[i] = 1.0 / (double)n;
+    for (size_t i = 0; i < n; i++) target[i] = measure[i];
 
     wot_sinkhorn_result_t *res = wot_sinkhorn(mod_cost, measure, n, target, n,
                                                reg, max_iter, tol);
